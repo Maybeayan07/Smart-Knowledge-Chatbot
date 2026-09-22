@@ -1,3 +1,5 @@
+import numpy as np
+
 from backend.db import get_connection
 
 
@@ -46,10 +48,10 @@ class PgVectorStore:
             cols += ", " + ", ".join(extra_columns)
 
         cur.execute(
-            f"SELECT {cols} FROM {self.table_name} "
+            f"SELECT {cols}, embedding <-> %s AS distance FROM {self.table_name} "
             f"WHERE session_id = %s "
             f"ORDER BY embedding <-> %s LIMIT %s",
-            (session_id, query_embedding, k)
+            (query_embedding, session_id, query_embedding, k)
         )
         rows = cur.fetchall()
         cur.close()
@@ -58,10 +60,78 @@ class PgVectorStore:
         results = []
         for row in rows:
             result = {"chunk_id": row[0], "text": row[1]}
+            offset = 2
             if extra_columns:
                 for idx, col in enumerate(extra_columns):
-                    result[col] = row[2 + idx]
+                    result[col] = row[offset + idx]
+                offset += len(extra_columns)
+            result["distance"] = row[offset]
             results.append(result)
+        return results
+
+    @staticmethod
+    def _to_array(v):
+        # pgvector returns a Vector object, not a plain list/array — unwrap
+        # it safely regardless of which form the driver gives us.
+        if hasattr(v, "to_list"):
+            return np.asarray(v.to_list(), dtype=np.float32)
+        return np.asarray(list(v), dtype=np.float32)
+
+    def search_with_confidence(self, query_embedding, session_id, logit_scale,
+                                confidence_threshold=0.4, min_similarity=0.2,
+                                extra_columns=None):
+        """
+        Relative-confidence search: instead of an absolute distance cutoff
+        (unreliable — CLIP's raw distances aren't consistently calibrated
+        across queries), this scores EVERY image in the session against the
+        query, converts cosine similarities into a proper probability
+        distribution via softmax (using CLIP's own logit_scale, the same
+        mechanism CLIP uses for zero-shot classification), and keeps only
+        the images that dominate that distribution.
+
+        min_similarity is a floor to guard the degenerate single-image-
+        session case, where softmax alone would always assign 100%
+        confidence to the only candidate even if it's irrelevant.
+        """
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cols = f"id, {self.content_column}, embedding"
+        if extra_columns:
+            cols += ", " + ", ".join(extra_columns)
+
+        cur.execute(
+            f"SELECT {cols} FROM {self.table_name} WHERE session_id = %s",
+            (session_id,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return []
+
+        query_vec = self._to_array(query_embedding)
+        embeddings = np.array([self._to_array(row[2]) for row in rows])
+
+        # Both sides are already unit-normalized, so the dot product IS the
+        # cosine similarity — no need for a separate normalization step.
+        similarities = embeddings @ query_vec
+
+        logits = similarities * logit_scale
+        exp_logits = np.exp(logits - np.max(logits))  # numerically stable softmax
+        probabilities = exp_logits / exp_logits.sum()
+
+        results = []
+        for row, sim, prob in zip(rows, similarities, probabilities):
+            if prob >= confidence_threshold and sim >= min_similarity:
+                result = {"chunk_id": row[0], "text": row[1], "confidence": float(prob)}
+                if extra_columns:
+                    for idx, col in enumerate(extra_columns):
+                        result[col] = row[3 + idx]
+                results.append(result)
+
+        results.sort(key=lambda r: r["confidence"], reverse=True)
         return results
 
     def search_by_text(self, text_column, query, session_id, k=3, extra_columns=None):

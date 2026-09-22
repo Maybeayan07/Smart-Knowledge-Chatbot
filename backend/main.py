@@ -16,6 +16,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
+from backend.image_processor import process_image, embed_text_query, get_logit_scale
 from backend.pdf_loader import extract_pages_from_file, clean_text
 from backend.text_splitter import split_pages_into_chunks
 from backend.embeddings import create_embeddings, model as embed_model
@@ -477,12 +478,18 @@ def clear_images(session_id: int = Query(...), user_id: int = Depends(get_curren
 
 
 @app.post("/search-image")
+@app.post("/search-image")
 def search_image(payload: Question, user_id: int = Depends(get_current_user_id)):
     if not image_store.has_data(payload.session_id):
         raise HTTPException(status_code=400, detail="No images uploaded yet. Upload one first via /upload-image.")
 
     query_embedding = embed_text_query(payload.question)
-    visual_results = image_store.search(query_embedding, payload.session_id, k=3)
+    logit_scale = get_logit_scale()
+
+    visual_results = image_store.search_with_confidence(
+        query_embedding, payload.session_id, logit_scale,
+        confidence_threshold=0.4, min_similarity=0.2
+    )
 
     text_results = image_store.search_by_text("ocr_text", payload.question, payload.session_id, k=3)
 
@@ -494,9 +501,10 @@ def search_image(payload: Question, user_id: int = Depends(get_current_user_id))
     save_message(payload.session_id, "user", payload.question)
     maybe_set_title(payload.session_id, payload.question)
 
+    if not combined:
+        return {"matches": [], "message": "No matching image found."}
+
     return {"matches": [r["text"] for r in combined]}
-
-
 @app.post("/predict-intent")
 def predict_intent(payload: Question, user_id: int = Depends(get_current_user_id)):
     if intent_classifier is None:

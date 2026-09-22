@@ -48,7 +48,7 @@ authForm.addEventListener("submit", async (e) => {
   const password = authPassword.value;
 
   try {
-    const res = await fetch(`/${authMode}`, {
+    const res = await fetch(`${API_BASE}/${authMode}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password })
@@ -75,7 +75,7 @@ authForm.addEventListener("submit", async (e) => {
 // This wraps the native fetch so we don't have to add headers everywhere manually.
 const originalFetch = window.fetch;
 window.fetch = function (url, options = {}) {
-  const isOwnApi = typeof url === "string" && url.startsWith("/");
+ const isOwnApi = typeof url === "string" && url.startsWith(API_BASE);
   if (isOwnApi && authToken) {
     options.headers = { ...(options.headers || {}), Authorization: `Bearer ${authToken}` };
   }
@@ -175,8 +175,7 @@ const uploadMenu = document.getElementById("uploadMenu");
 const fileInputDoc = document.getElementById("fileInputDoc");
 const fileInputImage = document.getElementById("fileInputImage");
 const composerAttachments = document.getElementById("composerAttachments");
-
-const API_BASE = "";
+const API_BASE = "http://127.0.0.1:8000";
 
 // Styling for the edit/regenerate controls is injected here directly,
 // so it always applies regardless of what's in style.css.

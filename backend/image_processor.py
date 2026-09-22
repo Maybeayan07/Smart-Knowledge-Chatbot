@@ -13,6 +13,12 @@ tokenizer = open_clip.get_tokenizer("ViT-B-32")
 model.to(device)
 model.eval()
 
+# CLIP's own learned temperature — used to convert raw cosine similarities
+# into calibrated confidence scores via softmax (same technique CLIP uses
+# for zero-shot classification).
+def get_logit_scale():
+    return model.logit_scale.exp().item()
+
 
 def embed_image(image_path):
     """
@@ -28,11 +34,19 @@ def embed_image(image_path):
     return embedding.cpu().numpy()[0]
 
 
-def embed_text_query(text):
+def embed_text_query(text, use_template=True):
     """
     Convert a text query into the SAME embedding space as images,
     so a text question can search against stored images.
+
+    use_template wraps the raw query into a CLIP-style caption prompt
+    ("a photo of X") — CLIP was trained on image-caption pairs, so a
+    caption-shaped query embeds much more meaningfully than a raw
+    question fragment like "give me human image".
     """
+    if use_template:
+        text = f"a photo of {text}"
+
     tokens = tokenizer([text]).to(device)
 
     with torch.no_grad():
